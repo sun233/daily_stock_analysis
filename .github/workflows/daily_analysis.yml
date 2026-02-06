@@ -30,6 +30,9 @@ jobs:
     timeout-minutes: 30
     
     steps:
+      - name: 随机延迟（避免固定时间访问）
+        run: sleep $((RANDOM % 60))  # 随机延迟0-60秒启动
+      
       - name: 检出代码
         uses: actions/checkout@v4
       
@@ -121,6 +124,9 @@ jobs:
           # 方式十：AstrBot
           ASTRBOT_URL: ${{ secrets.ASTRBOT_URL }}
           ASTRBOT_TOKEN: ${{ secrets.ASTRBOT_TOKEN }}
+
+          # 方式十一：Server酱3
+          SERVERCHAN3_SENDKEY: ${{ secrets.SERVERCHAN3_SENDKEY }}
 
           # ==========================================
           # 自选股配置
