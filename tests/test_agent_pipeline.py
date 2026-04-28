@@ -21,6 +21,10 @@ from unittest.mock import MagicMock, patch, PropertyMock
 from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any
 
+from tests.litellm_stub import ensure_litellm_stub
+
+ensure_litellm_stub()
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 
@@ -40,12 +44,12 @@ class TestAgentConfig(unittest.TestCase):
     @patch('src.config.load_dotenv')
     def test_default_agent_config(self, _mock_dotenv):
         """Agent mode should be disabled by default."""
-        from src.config import Config
+        from src.config import AGENT_MAX_STEPS_DEFAULT, Config
         Config._instance = None
         config = Config._load_from_env()
         self.assertEqual(config.agent_litellm_model, "")
         self.assertFalse(config.agent_mode)
-        self.assertEqual(config.agent_max_steps, 10)
+        self.assertEqual(config.agent_max_steps, AGENT_MAX_STEPS_DEFAULT)
         self.assertEqual(config.agent_skills, [])
 
     @patch.dict(os.environ, {
@@ -334,6 +338,7 @@ class TestAgentResultConversion(unittest.TestCase):
             mock_cfg.max_workers = 2
             mock_cfg.agent_mode = True
             mock_cfg.agent_max_steps = 10
+            mock_cfg.agent_orchestrator_timeout_s = 0
             mock_cfg.agent_skills = []
             mock_cfg.bocha_api_keys = []
             mock_cfg.tavily_api_keys = []
@@ -628,7 +633,8 @@ class TestAnalyzeWithAgentStockName(unittest.TestCase):
              patch('src.core.pipeline.GeminiAnalyzer'), \
              patch('src.core.pipeline.NotificationService'), \
              patch('src.core.pipeline.SearchService'), \
-             patch('src.agent.factory.build_agent_executor') as mock_build_executor:
+             patch('src.agent.factory.build_agent_executor') as mock_build_executor, \
+             patch('src.agent.executor.AgentExecutor.run') as mock_agent_run:
 
             mock_cfg = MagicMock()
             mock_cfg.max_workers = 2
@@ -668,6 +674,7 @@ class TestAnalyzeWithAgentStockName(unittest.TestCase):
             mock_executor = MagicMock()
             mock_executor.run.return_value = agent_result
             mock_build_executor.return_value = mock_executor
+            mock_agent_run.return_value = agent_result
 
             news_response = MagicMock()
             news_response.success = True
@@ -821,6 +828,195 @@ class TestAgentConstructionChain(unittest.TestCase):
 
         self.assertEqual(calls, ["openai/gpt-4o-mini", "anthropic/claude-3-5-sonnet-20241022"])
         self.assertEqual(result.content, "ok")
+
+    @patch("src.agent.llm_adapter.Router")
+    def test_llm_adapter_normalizes_kimi_k26_temperature(self, _mock_router):
+        """Agent direct LiteLLM calls should not send unsupported temperatures to Kimi K2.6."""
+        mock_cfg = SimpleNamespace(
+            agent_litellm_model="",
+            litellm_model="openai/kimi-k2.6",
+            litellm_fallback_models=[],
+            llm_model_list=[],
+            llm_temperature=0.2,
+            gemini_api_keys=[],
+            anthropic_api_keys=[],
+            openai_api_keys=[],
+            deepseek_api_keys=[],
+            openai_base_url=None,
+        )
+
+        from src.agent.llm_adapter import LLMToolAdapter
+        adapter = LLMToolAdapter(config=mock_cfg)
+        adapter._router = None
+        response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content="agent ok",
+                        tool_calls=[],
+                    )
+                )
+            ],
+            usage=SimpleNamespace(prompt_tokens=1, completion_tokens=2, total_tokens=3),
+        )
+
+        with patch("src.agent.llm_adapter.litellm.completion", return_value=response) as mock_completion:
+            result = adapter._call_litellm_model(
+                [{"role": "user", "content": "hi"}],
+                [],
+                "openai/kimi-k2.6",
+                temperature=0.2,
+            )
+
+        self.assertEqual(result.content, "agent ok")
+        self.assertEqual(mock_completion.call_args.kwargs["temperature"], 1.0)
+
+    @patch("src.agent.llm_adapter.Router")
+    def test_llm_adapter_normalizes_kimi_k26_temperature_for_yaml_alias(self, _mock_router):
+        """Agent direct LiteLLM calls should normalize through routed YAML aliases."""
+        mock_cfg = SimpleNamespace(
+            agent_litellm_model="",
+            litellm_model="kimi_router",
+            litellm_fallback_models=[],
+            llm_model_list=[
+                {
+                    "model_name": "kimi_router",
+                    "litellm_params": {"model": "openai/kimi-k2.6"},
+                }
+            ],
+            llm_temperature=0.2,
+            gemini_api_keys=[],
+            anthropic_api_keys=[],
+            openai_api_keys=[],
+            deepseek_api_keys=[],
+            openai_base_url=None,
+        )
+
+        from src.agent.llm_adapter import LLMToolAdapter
+        adapter = LLMToolAdapter(config=mock_cfg)
+        adapter._router = None
+        response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content="agent ok",
+                        tool_calls=[],
+                    )
+                )
+            ],
+            usage=SimpleNamespace(prompt_tokens=1, completion_tokens=2, total_tokens=3),
+        )
+
+        with patch("src.agent.llm_adapter.litellm.completion", return_value=response) as mock_completion:
+            result = adapter._call_litellm_model(
+                [{"role": "user", "content": "hi"}],
+                [],
+                "kimi_router",
+                temperature=0.2,
+            )
+
+        self.assertEqual(result.content, "agent ok")
+        self.assertEqual(mock_completion.call_args.kwargs["temperature"], 1.0)
+
+    @patch("src.agent.llm_adapter.Router")
+    def test_llm_adapter_normalizes_kimi_k26_temperature_for_non_thinking_yaml_alias(self, _mock_router):
+        """Agent direct LiteLLM calls should honor non-thinking Kimi YAML overrides."""
+        mock_cfg = SimpleNamespace(
+            agent_litellm_model="",
+            litellm_model="kimi_router",
+            litellm_fallback_models=[],
+            llm_model_list=[
+                {
+                    "model_name": "kimi_router",
+                    "litellm_params": {
+                        "model": "openai/kimi-k2.6",
+                        "extra_body": {"thinking": {"type": "disabled"}},
+                    },
+                }
+            ],
+            llm_temperature=0.2,
+            gemini_api_keys=[],
+            anthropic_api_keys=[],
+            openai_api_keys=[],
+            deepseek_api_keys=[],
+            openai_base_url=None,
+        )
+
+        from src.agent.llm_adapter import LLMToolAdapter
+        adapter = LLMToolAdapter(config=mock_cfg)
+        adapter._router = None
+        response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content="agent ok",
+                        tool_calls=[],
+                    )
+                )
+            ],
+            usage=SimpleNamespace(prompt_tokens=1, completion_tokens=2, total_tokens=3),
+        )
+
+        with patch("src.agent.llm_adapter.litellm.completion", return_value=response) as mock_completion:
+            result = adapter._call_litellm_model(
+                [{"role": "user", "content": "hi"}],
+                [],
+                "kimi_router",
+                temperature=0.2,
+            )
+
+        self.assertEqual(result.content, "agent ok")
+        self.assertEqual(mock_completion.call_args.kwargs["temperature"], 0.6)
+
+    @patch("src.agent.llm_adapter.Router")
+    def test_llm_adapter_fallback_does_not_leak_kimi_fixed_temperature(self, _mock_router):
+        """Non-Kimi fallbacks should keep the requested temperature after a Kimi failure."""
+        mock_cfg = SimpleNamespace(
+            agent_litellm_model="",
+            litellm_model="openai/kimi-k2.6",
+            litellm_fallback_models=["openai/gpt-4o-mini"],
+            llm_model_list=[],
+            llm_temperature=0.2,
+            gemini_api_keys=[],
+            anthropic_api_keys=[],
+            openai_api_keys=[],
+            deepseek_api_keys=[],
+            openai_base_url=None,
+        )
+
+        from src.agent.llm_adapter import LLMToolAdapter
+        adapter = LLMToolAdapter(config=mock_cfg)
+        response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content="fallback ok",
+                        tool_calls=[],
+                    )
+                )
+            ],
+            usage=SimpleNamespace(prompt_tokens=1, completion_tokens=2, total_tokens=3),
+        )
+        temperatures = []
+
+        def fake_completion(**kwargs):
+            temperatures.append((kwargs["model"], kwargs["temperature"]))
+            if kwargs["model"] == "openai/kimi-k2.6":
+                raise RuntimeError("primary failed")
+            return response
+
+        with patch("src.agent.llm_adapter.litellm.completion", side_effect=fake_completion):
+            result = adapter.call_completion(
+                messages=[{"role": "user", "content": "hi"}],
+                tools=[],
+                temperature=0.2,
+            )
+
+        self.assertEqual(result.content, "fallback ok")
+        self.assertEqual(
+            temperatures,
+            [("openai/kimi-k2.6", 1.0), ("openai/gpt-4o-mini", 0.2)],
+        )
 
     @patch("src.agent.llm_adapter.Router")
     def test_llm_adapter_recomputes_timeout_for_each_fallback_attempt(self, _mock_router):
