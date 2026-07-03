@@ -143,6 +143,6 @@ class PushplusSender:
                 logger.error(f"PushPlus 第 {i+1}/{total_chunks} 批发送失败")
 
             if i < total_chunks - 1:
-                time.sleep(1)
+                time.sleep(16)
 
         return success_count == total_chunks
